@@ -10,12 +10,18 @@
  * 	- Sebastian Puschhof (MIDAN Software GmbH)
  *	- Juan Jesús Cervera (Teruel)
  *
- * Last update: 2021-10-05
+ * Last update: 2021-11-15
  * Changelog:
- *	2017-02-07 - Oliver Skibbe oliskibbe@gmail.com
+ * 	2017-02-07 - Oliver Skibbe oliskibbe@gmail.com
  *		- Added UOM "c" to perfdata output
- *      2021-10-05 - vKnmnn
- *              - Fixed perfdata
+ *	2021-10-05 - Robert von Könemann vKnmnn@github.com
+ *		- Move UOM "c" to be output for appropriate values only 
+ *		  and fix a mistake where the "c" would be appended at the end of the string,
+ *		  leading to perfdata being ignored
+ *	2021-11-15 - Robert von Könemann vknmnn@github.com
+ *		- Enable setting Warning and Critical levels for toner as Integers 0 <= x <= 100
+ *		  by using the suffix '%', as well as absolute numbers (of pages) 
+ *		  you know your printers support it, by suffixing 'p'
  */
 
 // ignore notices
@@ -27,43 +33,49 @@ echo $_SERVER['argv'][0]." ip community snmp command
 -> snmp versions = 1, v2c
 
  -> counter num
-Gibt verschiedenen Counter des Druckers aus. Counter 2-num sind Ricoh spezifisch.
-Counter 1 ist immer Lifetimecounter fuer gedruckte Seiten. Liefert perfdata.
-Status ist immer OK wenn Counter existiert ansonsten UNKNOWN.
+Returns a printer’s counter, if available. Counter 2-num are specific to Ricoh
+printers. Counter 1 will always be the number of printed pages. Also returns perfdata.
+State will always be OK if counter exists and UNKNOWN otherwise.
 
  -> toner_kyocera_monochrome
  -> toner_ricoh_monochrome / toner_ricoh_color
  -> toner/ink num [warn] [crit] [max]
-Gibt den Status des Toners bzw der Tinte aus. Liefert Fuellstand als perfdata wenn
-moeglich. Wenn der Drucker falsche Maximalwerte fuer Patronen/Toner liefert
-(z.b. HP Businessink) kann mit max der richtige Wert angegeben werden (meist 100).
-warn gibt die Schwelle zwischen ok und warning an (0.0 bis 1.0; default: 0.2 = 20%)
+Returns the state of toner/ink cartridges. Also returns perfdata when possible.
+For broken printers with incorrent MAX values, you can override it by giving
+the argument 'max' with it’s value (e.g. HP Businessink, you want it to be 100 in many cases).
+warn and crit sets the warning and critical level. Give it as either a float  0 < warn <= 1
+or supply it as a percentage like '20%'
+or supply it as a number of pages, if your printer reports it that way as '50p'
+(default: 0.2 = 20% and  0.0 = 0%)
 
  -> paper num [warn] [crit]
-Gibt den Status des Papiertrays num aus. Liefert Fuellstand als perfdata wenn moeglich.
-warn gibt die Schwelle zwischen ok und warning an (0.0 bis 1.0; default: 0.2 = 20%)
+Returns the state of the paper tray by number 'num'.
+Returns perfdata if possible.
+warn and crit set the warning and critical levels.
+These have to be supplied as float numbers.
+(0.0 to 1.0; default: 0.2 = 20% and 0.0 = 0%)
 
  -> hardware num
-Gibt Status der Komponente num aus (z.b. CPU, RAMDISK).
-Liefert perfdata wenn moeglich (Bedeutung oft ungewiss).
+Returns the state of component 'num' (e.g. CPU, RAMDISK).
+Tries to return perfdata, but interpreting it is up to you.
 
  -> parts num
-Gibt den Status des Druckerteiles num aus (Bsp: Rear Unit).
+Returns state of the part 'num' (e.g. (Rear Unit).
 
  -> alerts
-Gibt alle wichtigen Druckermeldungen aus. Ignoriert soweit moeglich unwichtige Meldungen
-(z.b. Energiesparmodus oder Aufwaermphase). Gibt bei jeder Meldung Status=warning.
-Bei Meldungen die trained bzw fieldservice erfordern oder servity gleich critical ist
-wird Status=critical zurueckgegeben.
+Returns all important alerts. Tries ignoring less important alerts like
+energy saving or warming up. Returns as WARNING always,
+unless resolving the alert requires trained field staff, then it will be CRITICAL
 
  -> accounting pw num [warn]
-Gibt den Status der Kostenstelle 1-num aus (Kyocera). Kostenstellen koennen per
-\"KM Net for Accounting\" oder im Druckermenu durch gedrueckt halten von OK und
-Druck auf Menu erstellt werden.
-Passwort setzt sich zusammen aus Druckernummer (4stellig) und wird dann mit 0 auf
-15 Stellen aufgefuellt. (bsp FS-2000 => 200000000000000)
-warn gibt die Schwelle zwischen ok und warning an (0.0 bis 1.0; default: 0.2 = 20%)
-Liefert perfdata
+Returns the state of accounting provider 'num' (Kyocera).
+Returns perfdata.
+Accounting options can be edited on printer via \"KM Net for Accounting\" or
+by holding OK and pressing Menu while in the menu.
+The password will be the printer number (4 digits) filled with zeroes to 15 digits.
+(e.g. FS-1200 => 200000000000000)
+warn sets the warning level, given as a float
+(0.0 to 1.0; default: 0.2 = 20%)
 ";
 
 }
@@ -266,8 +278,8 @@ switch ( $command ) {
 			nagios_return ( 3, "Too few parameter!" );
 
 		$num = (int) $_SERVER['argv'][5];
-		$warn = $_SERVER['argc']>6?(float)$_SERVER['argv'][6]:0.2;
-		$crit = $_SERVER['argc']>7?(float)$_SERVER['argv'][7]:0.0;
+		$warn = $_SERVER['argc']>6?$_SERVER['argv'][6]:0.2;
+		$crit = $_SERVER['argc']>7?$_SERVER['argv'][7]:0.0;
 
 		$name = snmp_get('.1.3.6.1.2.1.43.11.1.1.6.1.'.$num );
 		$max = snmp_get('.1.3.6.1.2.1.43.11.1.1.8.1.'.$num );
@@ -275,7 +287,13 @@ switch ( $command ) {
 
 		// Quirk for broken printer
 		$max = $_SERVER['argc']>8?(float)$_SERVER['argv'][8]:$max;
-
+		
+		# let’s us give warn and crit as percentages '5%' or in absolute numbers as '10p'
+		if ( preg_match( '@([0-9]+)([%p])$@', $warn, $matches ) )
+			$warn = $matches[2]==='%'?$matches[1]/100:$matches[1]/$max;
+		if ( preg_match( '@([0-9]+)([%p])$@', $crit, $matches ) )
+			$crit = $matches[2]==='%'?$matches[1]/100:$matches[1]/$max;
+		
 		if ( $name === FALSE || $max === FALSE || $cur === FALSE )
 			nagios_return ( 3, "Toner/Ink ".$num." does not exist!" );
 
